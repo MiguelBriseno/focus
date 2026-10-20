@@ -31,6 +31,7 @@ const settings = Object.assign(
 let tokenClient = null;
 let events = [];
 let lastFetch = 0;
+let lastActiveKey = '';
 
 // ---------- Clock ----------
 
@@ -250,6 +251,15 @@ function renderEvents() {
     li.append(when, body);
     list.append(li);
   }
+
+  // Keep the current/next meeting in view; only scroll when it changes so manual scrolling sticks.
+  const active = list.querySelector('.event.now, .event.next-up');
+  const activeKey = active ? active.textContent : '';
+  // The list only scrolls on its own in landscape; in portrait this is a no-op.
+  if (active && activeKey !== lastActiveKey) {
+    list.scrollTop = Math.max(0, active.offsetTop - 12);
+  }
+  lastActiveKey = activeKey;
 
   const remaining = events.some((e) => e.allDay || new Date(e.end) > now);
   $('empty').hidden = remaining || !store.get('events', null);
