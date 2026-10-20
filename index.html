@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0d10">
+  <meta name="description" content="Reloj y reuniones del día para trabajar sin distracciones.">
+  <title>Focus</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app">
+    <header class="top">
+      <span id="status" class="status" hidden></span>
+      <button id="settings-btn" class="icon-btn" aria-label="Ajustes">⚙</button>
+    </header>
+
+    <section class="clock" id="clock" aria-live="off">
+      <div class="time"><span id="hm">--:--</span><span id="sec" class="sec"></span><span id="ampm" class="sec"></span></div>
+      <div id="date" class="date"></div>
+      <div id="next" class="next" hidden></div>
+    </section>
+
+    <section class="agenda">
+      <h2>Hoy</h2>
+      <button id="connect" class="primary" hidden>Conectar Google Calendar</button>
+      <ul id="events" class="events"></ul>
+      <p id="empty" class="muted" hidden>Sin reuniones el resto del día.</p>
+    </section>
+  </main>
+
+  <dialog id="settings">
+    <form method="dialog" class="settings">
+      <h2>Ajustes</h2>
+      <label>
+        Google OAuth Client ID
+        <input id="client-id" type="text" autocomplete="off" spellcheck="false"
+               placeholder="xxxxxxxx.apps.googleusercontent.com">
+      </label>
+      <label class="row">
+        <input id="wake" type="checkbox" checked>
+        Mantener la pantalla encendida
+      </label>
+      <label class="row">
+        <input id="seconds" type="checkbox" checked>
+        Mostrar segundos
+      </label>
+      <label class="row">
+        <input id="h24" type="checkbox">
+        Formato 24 horas
+      </label>
+      <div class="actions">
+        <button type="button" id="disconnect" class="ghost">Desconectar</button>
+        <button value="save" class="primary">Guardar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="https://accounts.google.com/gsi/client" async></script>
+  <script src="app.js"></script>
+</body>
+</html>
