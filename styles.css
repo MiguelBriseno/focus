@@ -1,3 +1,10 @@
+@font-face {
+  font-family: "Orbitron";
+  src: url("fonts/orbitron.woff2") format("woff2");
+  font-weight: 400 900;
+  font-display: swap;
+}
+
 :root {
   --bg: #0b0d10;
   --surface: #14181d;
@@ -59,23 +66,33 @@ html, body {
 }
 
 .time {
-  font-size: clamp(72px, 26vw, 160px);
-  font-weight: 200;
-  letter-spacing: -0.04em;
+  font-family: "Orbitron", system-ui, sans-serif;
+  font-size: clamp(56px, 19vw, 132px);
+  font-weight: 800;
   line-height: 1;
-  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  text-shadow:
+    0 0 6px rgba(110, 231, 183, 0.55),
+    0 0 24px rgba(110, 231, 183, 0.35),
+    0 0 60px rgba(110, 231, 183, 0.2);
+  white-space: nowrap;
 }
 .sec {
-  font-size: 0.28em;
+  font-size: 0.3em;
+  font-weight: 600;
   color: var(--muted);
-  letter-spacing: 0;
+  text-shadow: none;
 }
-#ampm { margin-left: 0.3em; }
 .sec:empty { display: none; }
+#ampm { margin-left: 0.3em; }
 
 .date {
   margin-top: 12px;
-  font-size: 20px;
+  font-family: "Orbitron", system-ui, sans-serif;
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
   color: var(--muted);
 }
 

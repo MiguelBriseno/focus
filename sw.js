@@ -1,10 +1,11 @@
-const CACHE = 'focus-v1';
+const CACHE = 'focus-v2';
 const ASSETS = [
   './',
   'index.html',
   'styles.css',
   'app.js',
   'manifest.webmanifest',
+  'fonts/orbitron.woff2',
   'icons/icon.svg',
   'icons/icon-192.png',
   'icons/icon-512.png',
