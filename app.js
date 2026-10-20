@@ -192,21 +192,27 @@ async function loadEvents() {
     timeMax: end.toISOString(),
     singleEvents: 'true',
     orderBy: 'startTime',
-    maxResults: '100',
+    maxResults: '250',
   });
 
   try {
-    const lists = await Promise.all(settings.calendars.map((id) => fetchCalendar(id, params, token)));
-    if (lists.includes(null)) {
+    const me = await myEmail(token);
+    // One broken calendar (revoked share, rate limit) must not block the others.
+    const results = await Promise.allSettled(
+      settings.calendars.map((id) => fetchCalendar(id, params, token, me)),
+    );
+    if (results.some((r) => r.status === 'fulfilled' && r.value === null)) {
       store.set('token', { value: '', exp: 0 });
       setStatus('Toca aquí para actualizar el calendario', true);
       return;
     }
-    // The same meeting can appear in several selected calendars.
+    const lists = results.filter((r) => r.status === 'fulfilled').map((r) => r.value);
+    if (!lists.length) throw new Error('all calendars failed');
+    // The same meeting can appear in several selected calendars, each in its own time zone.
     const seen = new Set();
     const all = lists.flat()
       .filter((ev) => {
-        const key = `${ev.uid}|${ev.start}`;
+        const key = `${ev.uid}|${startDate(ev).getTime()}`;
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
@@ -216,26 +222,56 @@ async function loadEvents() {
     tomorrowFirst = all.find((ev) => !ev.allDay && startDate(ev) >= endOfToday) || null;
     store.set('events', { day: currentDay, items: events, tomorrow: tomorrowFirst });
     $('connect').hidden = true;
-    setStatus('');
+    setStatus(lists.length < results.length ? 'Algún calendario no se pudo cargar' : '');
     renderEvents();
   } catch {
     setStatus('Sin conexión — mostrando lo último guardado', false);
   }
 }
 
+// The signed-in user's address is the primary calendar's id. Needed because an attendee's
+// `self` flag marks the calendar a copy lives on, not the user, when reading shared calendars.
+async function myEmail(token) {
+  const cached = store.get('me', null);
+  if (cached) return cached;
+  try {
+    const res = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return '';
+    const { id } = await res.json();
+    store.set('me', id);
+    return id;
+  } catch {
+    return '';
+  }
+}
+
+function isMe(attendee, me) {
+  return me ? attendee.email?.toLowerCase() === me.toLowerCase() : !!attendee.self;
+}
+
 // Returns null on 401 so the caller can drop the token; a calendar that no longer exists yields [].
-async function fetchCalendar(id, params, token) {
-  const res = await fetch(
-    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(id)}/events?${params}`,
-    { headers: { Authorization: `Bearer ${token}` } },
-  );
-  if (res.status === 401) return null;
-  if (res.status === 404) return [];
-  if (!res.ok) throw new Error(res.status);
-  const data = await res.json();
-  return (data.items || [])
+async function fetchCalendar(id, params, token, me) {
+  const items = [];
+  let pageToken = '';
+  do {
+    const page = new URLSearchParams(params);
+    if (pageToken) page.set('pageToken', pageToken);
+    const res = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(id)}/events?${page}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (res.status === 401) return null;
+    if (res.status === 404) return [];
+    if (!res.ok) throw new Error(res.status);
+    const data = await res.json();
+    items.push(...(data.items || []));
+    pageToken = data.nextPageToken || '';
+  } while (pageToken);
+  return items
     .filter((ev) => ev.status !== 'cancelled')
-    .filter((ev) => !(ev.attendees || []).some((a) => a.self && a.responseStatus === 'declined'))
+    .filter((ev) => !(ev.attendees || []).some((a) => isMe(a, me) && a.responseStatus === 'declined'))
     .map((ev) => ({
       id: ev.id,
       uid: ev.iCalUID || ev.id,
@@ -250,7 +286,7 @@ async function fetchCalendar(id, params, token) {
       description: htmlToText(ev.description || '').slice(0, 2000),
       attendees: (ev.attendees || [])
         .filter((a) => !a.resource)
-        .map((a) => ({ name: a.displayName || a.email, status: a.responseStatus, self: !!a.self })),
+        .map((a) => ({ name: a.displayName || a.email, status: a.responseStatus, self: isMe(a, me) })),
     }));
 }
 
@@ -259,11 +295,18 @@ function startDate(ev) {
   return new Date(ev.allDay ? `${ev.start}T00:00` : ev.start);
 }
 
-// Descriptions arrive as HTML; DOMParser never runs scripts, and only text is kept.
+// Descriptions arrive as HTML or plain text; DOMParser never runs scripts, and only text is kept.
 function htmlToText(html) {
+  // Plain text like "budget <see notes>" must not be eaten as a tag.
+  if (!/<\/?(a|b|i|u|p|br|div|span|ul|ol|li|strong|em|html)\b/i.test(html)) return html.trim();
   const withBreaks = html.replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|li)>/gi, '\n');
   const doc = new DOMParser().parseFromString(withBreaks, 'text/html');
   doc.querySelectorAll('script, style').forEach((el) => el.remove());
+  // Keep link targets (meeting notes, docs) that the anchor text would otherwise hide.
+  doc.querySelectorAll('a[href]').forEach((a) => {
+    const href = a.getAttribute('href');
+    if (/^https?:/i.test(href) && a.textContent.trim() !== href) a.append(` (${href})`);
+  });
   return doc.body.textContent.trim();
 }
 
@@ -452,10 +495,19 @@ function freeMinutes() {
   return upcoming ? Math.floor((new Date(upcoming.start) - now) / 60000) : Infinity;
 }
 
+// Leave 2 min of slack before the next meeting.
+function focusLength(free) {
+  return Math.min(FOCUS_MIN, free - 2);
+}
+
 function startFocus() {
   const free = freeMinutes();
-  // Leave 2 min of slack before the next meeting.
-  const min = Math.min(FOCUS_MIN, free === Infinity ? FOCUS_MIN : free - 2);
+  // The button may have been rendered before a new meeting arrived.
+  if (free === null || free < FOCUS_MIN_GAP) {
+    renderFocus();
+    return;
+  }
+  const min = focusLength(free);
   focus = { start: Date.now(), end: Date.now() + min * 60000 };
   store.set('focus', focus);
   renderFocus();
@@ -488,7 +540,7 @@ function renderFocus() {
     label.hidden = true;
     const free = freeMinutes();
     btn.hidden = free === null || free < FOCUS_MIN_GAP;
-    if (!btn.hidden) btn.textContent = `Bloque de enfoque · ${Math.min(FOCUS_MIN, free === Infinity ? FOCUS_MIN : free - 2)} min`;
+    if (!btn.hidden) btn.textContent = `Bloque de enfoque · ${focusLength(free)} min`;
   }
   renderProgress(now);
 }
@@ -505,18 +557,19 @@ function renderProgress(now) {
 
 // ---------- Night mode & burn-in ----------
 
-function toMinutes(hhmm) {
-  const [h, m] = hhmm.split(':').map(Number);
-  return h * 60 + m;
+function toMinutes(hhmm, fallback) {
+  const [h, m] = String(hhmm).split(':').map(Number);
+  return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : toMinutes(fallback, '00:00');
 }
 
 function applyNight(now) {
   let on = false;
   if (settings.night) {
     const cur = now.getHours() * 60 + now.getMinutes();
-    const from = toMinutes(settings.nightFrom);
-    const to = toMinutes(settings.nightTo);
-    on = from <= to ? cur >= from && cur < to : cur >= from || cur < to;
+    const from = toMinutes(settings.nightFrom, '22:00');
+    const to = toMinutes(settings.nightTo, '07:00');
+    // Same start and end means "always dim".
+    on = from === to || (from < to ? cur >= from && cur < to : cur >= from || cur < to);
   }
   document.documentElement.classList.toggle('night', on);
 }
@@ -629,7 +682,10 @@ async function renderCalendarChoices() {
     className: 'muted', textContent: getToken() ? 'Cargando…' : 'Conecta Google Calendar para elegir.',
   }));
   const cals = await listCalendars();
-  if (!cals) return;
+  if (!cals) {
+    if (getToken()) box.firstChild.textContent = 'No se pudieron cargar los calendarios. Vuelve a abrir Ajustes para reintentar.';
+    return;
+  }
   box.replaceChildren(...cals.map((cal) => {
     // The primary calendar is stored as 'primary' so the default keeps working across accounts.
     const id = cal.primary ? 'primary' : cal.id;
@@ -653,6 +709,7 @@ $('settings').addEventListener('close', () => {
   if (newId !== settings.clientId) {
     tokenClient = null;
     store.remove('token');
+    store.remove('me');
   }
   settings.clientId = newId;
   settings.wake = $('wake').checked;
@@ -683,6 +740,7 @@ $('disconnect').addEventListener('click', () => {
   renewingSince = 0;
   store.remove('token');
   store.remove('events');
+  store.remove('me');
   events = [];
   tomorrowFirst = null;
   renderEvents();
@@ -692,7 +750,7 @@ $('disconnect').addEventListener('click', () => {
 
 $('settings-btn').addEventListener('click', openSettings);
 $('focus-btn').addEventListener('click', () => (focus ? stopFocus() : startFocus()));
-$('clock').addEventListener('dblclick', () => {
+$('clock').querySelector('.time').addEventListener('dblclick', () => {
   if (!document.fullscreenEnabled) return;
   if (document.fullscreenElement) document.exitFullscreen();
   else document.documentElement.requestFullscreen().catch(() => {});
