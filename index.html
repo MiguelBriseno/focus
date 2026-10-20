@@ -23,6 +23,7 @@
       <div class="time"><span id="hm">--:--</span><span id="sec" class="sec"></span><span id="ampm" class="sec"></span></div>
       <div id="date" class="date"></div>
       <div id="next" class="next" hidden></div>
+      <a id="join" class="join" target="_blank" rel="noopener" hidden></a>
     </section>
 
     <section class="agenda">
@@ -52,6 +53,20 @@
       <label class="row">
         <input id="h24" type="checkbox">
         Formato 24 horas
+      </label>
+      <label>
+        Avisar antes de cada reunión
+        <select id="alert-min">
+          <option value="0">No avisar</option>
+          <option value="1">1 minuto antes</option>
+          <option value="2">2 minutos antes</option>
+          <option value="5">5 minutos antes</option>
+          <option value="10">10 minutos antes</option>
+        </select>
+      </label>
+      <label class="row">
+        <input id="sound" type="checkbox" checked>
+        Sonido en los avisos
       </label>
       <div class="actions">
         <button type="button" id="disconnect" class="ghost">Desconectar</button>

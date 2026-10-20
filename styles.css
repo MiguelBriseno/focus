@@ -13,6 +13,7 @@
   --muted: #7d8794;
   --accent: #6ee7b7;
   --now: #fbbf24;
+  --late: #f87171;
   color-scheme: dark;
 }
 
@@ -100,6 +101,37 @@ html, body {
   margin-top: 20px;
   font-size: 15px;
   color: var(--accent);
+  transition: color 0.4s;
+}
+.next.soon { color: var(--now); }
+.next.imminent { color: var(--late); font-weight: 600; }
+
+.join {
+  display: inline-block;
+  margin-top: 16px;
+  max-width: 100%;
+  padding: 14px 24px;
+  border-radius: 12px;
+  background: var(--accent);
+  color: #04281b;
+  font-size: 17px;
+  font-weight: 700;
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.join[hidden] { display: none; }
+
+.clock.alerting .time { animation: alert-pulse 1s ease-in-out 3; }
+@keyframes alert-pulse {
+  50% {
+    color: var(--now);
+    text-shadow: 0 0 10px rgba(251, 191, 36, 0.7), 0 0 40px rgba(251, 191, 36, 0.35);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .clock.alerting .time { animation: none; }
 }
 
 .agenda h2 {
@@ -206,7 +238,7 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
 .settings h2 { margin: 0; font-size: 18px; }
 .settings label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
 .settings label.row { display: flex; align-items: center; gap: 10px; color: var(--text); }
-.settings input[type="text"] {
+.settings input[type="text"], .settings select {
   font: inherit;
   font-size: 14px;
   padding: 10px;

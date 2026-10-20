@@ -2,6 +2,10 @@
 
 const SCOPE = 'https://www.googleapis.com/auth/calendar.readonly';
 const REFRESH_MS = 5 * 60 * 1000;
+const RENEW_BEFORE_MS = 15 * 60 * 1000;
+const RENEW_TIMEOUT_MS = 60 * 1000;
+const STALE_ALERT_MS = 90 * 1000;
+const JOIN_WINDOW_MS = 2 * 60 * 1000;
 const LOCALE = 'es-MX';
 
 const $ = (id) => document.getElementById(id);
@@ -24,7 +28,7 @@ const store = {
 };
 
 const settings = Object.assign(
-  { clientId: '', wake: true, seconds: true, h24: false },
+  { clientId: '', wake: true, seconds: true, h24: false, alertMin: 5, sound: true },
   store.get('settings', {}),
 );
 
@@ -32,6 +36,10 @@ let tokenClient = null;
 let events = [];
 let lastFetch = 0;
 let lastActiveKey = '';
+let renewingSince = 0;
+let authGen = 0; // bumped on disconnect so in-flight token responses are dropped
+const alerted = new Set();
+let lastAlertCheck = Date.now();
 
 // ---------- Clock ----------
 
@@ -74,6 +82,7 @@ function tick() {
   }
   if (now.getSeconds() === 0) renderEvents();
   if (Date.now() - lastFetch > REFRESH_MS) loadEvents();
+  checkAlerts();
 
   setTimeout(tick, 1000 - (Date.now() % 1000));
 }
@@ -87,10 +96,13 @@ function getToken() {
 
 function initGoogle() {
   if (!settings.clientId || !window.google?.accounts?.oauth2) return false;
+  const gen = authGen;
   tokenClient = google.accounts.oauth2.initTokenClient({
     client_id: settings.clientId,
     scope: SCOPE,
     callback: (resp) => {
+      if (gen !== authGen) return;
+      renewingSince = 0;
       if (resp.error) {
         setStatus('No se pudo conectar con Google', true);
         return;
@@ -99,8 +111,29 @@ function initGoogle() {
       lastFetch = 0;
       loadEvents();
     },
+    // Popup blocked or closed: leave the tap-to-refresh status as the fallback.
+    error_callback: () => {
+      renewingSince = 0;
+      if (!getToken()) setStatus('Toca aquí para actualizar el calendario', true);
+    },
   });
   return true;
+}
+
+function isRenewing() {
+  return Date.now() - renewingSince < RENEW_TIMEOUT_MS;
+}
+
+// Implicit-flow tokens last ~1 h with no refresh token, and GIS needs a user gesture
+// to open its popup, so renewal piggybacks on any tap in the last stretch before expiry.
+// With consent already granted the popup closes on its own.
+function maybeRenewToken() {
+  const t = store.get('token', null);
+  if (!t || isRenewing() || !settings.clientId) return;
+  if (t.exp - Date.now() > RENEW_BEFORE_MS) return;
+  if (!tokenClient && !initGoogle()) return;
+  renewingSince = Date.now();
+  tokenClient.requestAccessToken({ prompt: '' });
 }
 
 function requestToken(interactive) {
@@ -108,6 +141,7 @@ function requestToken(interactive) {
     openSettings();
     return;
   }
+  renewingSince = Date.now();
   tokenClient.requestAccessToken({ prompt: interactive ? 'consent' : '' });
 }
 
@@ -265,6 +299,12 @@ function renderEvents() {
   $('empty').hidden = remaining || !store.get('events', null);
 
   const next = $('next');
+  next.classList.remove('soon', 'imminent');
+  if (upcoming && !current.length) {
+    const ms = new Date(upcoming.start) - now;
+    if (ms <= 60000) next.classList.add('imminent');
+    else if (ms <= (settings.alertMin || 5) * 60000) next.classList.add('soon');
+  }
   if (current.length) {
     const ev = current[0];
     next.textContent = `En curso: ${ev.title} · termina en ${humanMinutes(Math.max(1, minutesUntil(new Date(ev.end))))}`;
@@ -275,6 +315,21 @@ function renderEvents() {
   } else {
     next.hidden = true;
   }
+  renderJoin(current, upcoming);
+}
+
+// Big join button from 2 min before start until 10 min in.
+function renderJoin(current, upcoming) {
+  const now = Date.now();
+  const ev = [upcoming, ...current].find((e) => e && e.link
+    && new Date(e.start) - now <= JOIN_WINDOW_MS
+    && now - new Date(e.start) <= 10 * 60 * 1000);
+  const join = $('join');
+  join.hidden = !ev;
+  if (ev) {
+    join.href = ev.link;
+    join.textContent = `Unirse a ${ev.title}`;
+  }
 }
 
 function setStatus(text, actionable) {
@@ -282,6 +337,66 @@ function setStatus(text, actionable) {
   el.textContent = text;
   el.hidden = !text;
   el.classList.toggle('warn', !!actionable);
+}
+
+// ---------- Meeting alerts ----------
+
+let audioCtx = null;
+
+// Browsers only allow audio after a user gesture, so the context is unlocked on the first tap.
+function unlockAudio() {
+  if (!audioCtx && window.AudioContext) audioCtx = new AudioContext();
+  if (audioCtx?.state === 'suspended') audioCtx.resume();
+}
+
+function chime() {
+  if (!settings.sound || !audioCtx || audioCtx.state !== 'running') return;
+  const t0 = audioCtx.currentTime;
+  [880, 660].forEach((freq, i) => {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.frequency.value = freq;
+    const t = t0 + i * 0.35;
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(0.25, t + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.6);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(t);
+    osc.stop(t + 0.6);
+  });
+}
+
+function alertFor(key) {
+  alerted.add(key);
+  chime();
+  navigator.vibrate?.([200, 100, 200]);
+  const clock = $('clock');
+  clock.classList.remove('alerting');
+  void clock.offsetWidth; // restart the animation
+  clock.classList.add('alerting');
+  renderEvents();
+}
+
+// One alert `alertMin` minutes before each meeting and one when it starts. Fires when a
+// threshold was crossed since the last check, so throttled background timers still
+// catch it, but not if it's older than STALE_ALERT_MS (e.g. reopening the app late).
+function checkAlerts() {
+  const now = Date.now();
+  const since = Math.max(lastAlertCheck, now - STALE_ALERT_MS);
+  lastAlertCheck = now;
+  if (!settings.alertMin) return;
+  for (const ev of events) {
+    if (ev.allDay) continue;
+    const start = new Date(ev.start).getTime();
+    const thresholds = [[start - settings.alertMin * 60000, 'lead'], [start, 'start']];
+    for (const [at, kind] of thresholds) {
+      const key = `${ev.id}|${ev.start}|${kind}`;
+      if (at > since && at <= now && !alerted.has(key)) {
+        alertFor(key);
+        break;
+      }
+    }
+  }
 }
 
 // ---------- Screen wake lock ----------
@@ -307,6 +422,9 @@ function openSettings() {
   $('wake').checked = settings.wake;
   $('seconds').checked = settings.seconds;
   $('h24').checked = settings.h24;
+  $('alert-min').value = String(settings.alertMin);
+  if (!$('alert-min').value) $('alert-min').value = '5';
+  $('sound').checked = settings.sound;
   $('settings').showModal();
 }
 
@@ -321,6 +439,8 @@ $('settings').addEventListener('close', () => {
   settings.wake = $('wake').checked;
   settings.seconds = $('seconds').checked;
   settings.h24 = $('h24').checked;
+  settings.alertMin = Number($('alert-min').value);
+  settings.sound = $('sound').checked;
   store.set('settings', settings);
   applyWakeLock();
   renderEvents();
@@ -330,6 +450,9 @@ $('settings').addEventListener('close', () => {
 $('disconnect').addEventListener('click', () => {
   const t = store.get('token', null);
   if (t?.value && window.google?.accounts?.oauth2) google.accounts.oauth2.revoke(t.value);
+  authGen++;
+  tokenClient = null;
+  renewingSince = 0;
   store.remove('token');
   store.remove('events');
   events = [];
@@ -339,6 +462,12 @@ $('disconnect').addEventListener('click', () => {
 });
 
 $('settings-btn').addEventListener('click', openSettings);
+// `click` counts as user activation for touch too (`pointerdown` only does for mouse).
+// Controls handle their own token flow, so taps on them don't also trigger a renewal.
+document.addEventListener('click', (e) => {
+  unlockAudio();
+  if (!e.target.closest('button, a, dialog, #status')) maybeRenewToken();
+}, { capture: true });
 $('connect').addEventListener('click', () => requestToken(!store.get('token', null)));
 $('status').addEventListener('click', () => {
   if ($('status').classList.contains('warn')) requestToken(false);
