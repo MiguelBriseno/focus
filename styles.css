@@ -64,7 +64,44 @@ html, body {
 .clock {
   text-align: center;
   padding: 8vh 0 6vh;
+  transform: translate(var(--dx, 0), var(--dy, 0));
+  transition: transform 2s ease;
+  cursor: default;
+  user-select: none;
 }
+
+.progress {
+  height: 3px;
+  width: min(320px, 70%);
+  margin: 14px auto 0;
+  border-radius: 2px;
+  background: linear-gradient(to right, var(--accent) var(--p, 0%), var(--line) var(--p, 0%));
+}
+.progress[hidden] { display: none; }
+
+.focus-row {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+}
+.focus {
+  font-family: "Orbitron", system-ui, sans-serif;
+  font-size: 15px;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.focus[hidden], #focus-btn[hidden] { display: none; }
+#focus-btn { padding: 8px 14px; font-size: 14px; }
+
+.tomorrow { margin-top: 4px; }
+
+/* Night: dim everything; the dialog lives in the top layer and stays readable. */
+.night .app { filter: brightness(0.45) saturate(0.6); }
+
+.event { cursor: pointer; }
 
 .time {
   font-family: "Orbitron", system-ui, sans-serif;
@@ -238,7 +275,35 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
 .settings h2 { margin: 0; font-size: 18px; }
 .settings label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
 .settings label.row { display: flex; align-items: center; gap: 10px; color: var(--text); }
-.settings input[type="text"], .settings select {
+.settings fieldset {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin: 0;
+  padding: 10px 12px 12px;
+}
+.settings legend { font-size: 14px; color: var(--muted); padding: 0 4px; }
+.calendars { display: grid; gap: 10px; }
+.calendars p { margin: 0; font-size: 14px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.night-range { display: flex; gap: 12px; }
+.night-range label { flex: 1; }
+.details h2 { overflow-wrap: anywhere; }
+.details p { margin: 0; }
+.details .join { justify-self: start; }
+.desc {
+  white-space: pre-line;
+  font-size: 14px;
+  line-height: 1.5;
+  max-height: 30vh;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+.attendees { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 14px; }
+.attendees li { display: flex; justify-content: space-between; gap: 12px; }
+.rsvp { color: var(--muted); font-size: 12px; flex: none; }
+.rsvp.accepted { color: var(--accent); }
+.rsvp.declined { color: var(--late); }
+.settings input[type="text"], .settings input[type="time"], .settings select {
   font: inherit;
   font-size: 14px;
   padding: 10px;

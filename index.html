@@ -23,7 +23,12 @@
       <div class="time"><span id="hm">--:--</span><span id="sec" class="sec"></span><span id="ampm" class="sec"></span></div>
       <div id="date" class="date"></div>
       <div id="next" class="next" hidden></div>
+      <div id="progress" class="progress" hidden></div>
       <a id="join" class="join" target="_blank" rel="noopener" hidden></a>
+      <div class="focus-row">
+        <span id="focus" class="focus" hidden></span>
+        <button id="focus-btn" class="ghost" type="button" hidden></button>
+      </div>
     </section>
 
     <section class="agenda">
@@ -31,6 +36,7 @@
       <button id="connect" class="primary" hidden>Conectar Google Calendar</button>
       <ul id="events" class="events"></ul>
       <p id="empty" class="muted" hidden>Sin reuniones el resto del día.</p>
+      <p id="tomorrow" class="muted tomorrow" hidden></p>
     </section>
   </main>
 
@@ -68,10 +74,34 @@
         <input id="sound" type="checkbox" checked>
         Sonido en los avisos
       </label>
+      <fieldset>
+        <legend>Calendarios</legend>
+        <div id="calendars" class="calendars"></div>
+      </fieldset>
+      <label class="row">
+        <input id="night" type="checkbox" checked>
+        Atenuar de noche
+      </label>
+      <div class="night-range">
+        <label>Desde <input id="night-from" type="time" value="22:00"></label>
+        <label>Hasta <input id="night-to" type="time" value="07:00"></label>
+      </div>
       <div class="actions">
         <button type="button" id="disconnect" class="ghost">Desconectar</button>
         <button value="save" class="primary">Guardar</button>
       </div>
+    </form>
+  </dialog>
+
+  <dialog id="details">
+    <form method="dialog" class="settings details">
+      <h2 id="d-title"></h2>
+      <p id="d-when" class="muted"></p>
+      <p id="d-location" class="muted" hidden></p>
+      <a id="d-link" class="join" target="_blank" rel="noopener" hidden>Unirse a la reunión</a>
+      <p id="d-desc" class="desc" hidden></p>
+      <ul id="d-attendees" class="attendees" hidden></ul>
+      <div class="actions"><span></span><button value="close" class="primary" autofocus>Cerrar</button></div>
     </form>
   </dialog>
 

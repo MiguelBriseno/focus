@@ -6,7 +6,11 @@ const RENEW_BEFORE_MS = 15 * 60 * 1000;
 const RENEW_TIMEOUT_MS = 60 * 1000;
 const STALE_ALERT_MS = 90 * 1000;
 const JOIN_WINDOW_MS = 2 * 60 * 1000;
-const LOCALE = 'es-MX';
+const FOCUS_MIN = 25;
+const FOCUS_MIN_GAP = 10;
+const SHIFT_MS = 3 * 60 * 1000;
+// Spanish variants follow the device (es-ES, es-AR…); other languages keep es-MX since the UI is Spanish.
+const LOCALE = navigator.language?.toLowerCase().startsWith('es') ? navigator.language : 'es-MX';
 
 const $ = (id) => document.getElementById(id);
 
@@ -28,12 +32,18 @@ const store = {
 };
 
 const settings = Object.assign(
-  { clientId: '', wake: true, seconds: true, h24: false, alertMin: 5, sound: true },
+  {
+    clientId: '', wake: true, seconds: true, h24: false, alertMin: 5, sound: true,
+    calendars: ['primary'], night: true, nightFrom: '22:00', nightTo: '07:00',
+  },
   store.get('settings', {}),
 );
 
 let tokenClient = null;
 let events = [];
+let tomorrowFirst = null;
+let focus = store.get('focus', null);
+let lastShift = 0;
 let lastFetch = 0;
 let lastActiveKey = '';
 let renewingSince = 0;
@@ -78,11 +88,15 @@ function tick() {
   if (todayKey(now) !== currentDay) {
     currentDay = todayKey(now);
     events = [];
+    tomorrowFirst = null;
     loadEvents();
   }
   if (now.getSeconds() === 0) renderEvents();
   if (Date.now() - lastFetch > REFRESH_MS) loadEvents();
   checkAlerts();
+  renderFocus();
+  applyNight(now);
+  shiftClock();
 
   setTimeout(tick, 1000 - (Date.now() % 1000));
 }
@@ -150,6 +164,7 @@ async function loadEvents() {
   const cached = store.get('events', null);
   if (cached && cached.day === currentDay) {
     events = cached.items;
+    tomorrowFirst = cached.tomorrow || null;
     renderEvents();
   }
 
@@ -169,47 +184,100 @@ async function loadEvents() {
   }
 
   const start = new Date(); start.setHours(0, 0, 0, 0);
-  const end = new Date(start); end.setDate(end.getDate() + 1);
+  const endOfToday = new Date(start); endOfToday.setDate(endOfToday.getDate() + 1);
+  // Fetch through tomorrow so the empty state can show the first meeting of the next day.
+  const end = new Date(start); end.setDate(end.getDate() + 2);
   const params = new URLSearchParams({
     timeMin: start.toISOString(),
     timeMax: end.toISOString(),
     singleEvents: 'true',
     orderBy: 'startTime',
-    maxResults: '50',
+    maxResults: '100',
   });
 
   try {
-    const res = await fetch(
-      `https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`,
-      { headers: { Authorization: `Bearer ${token}` } },
-    );
-    if (res.status === 401) {
+    const lists = await Promise.all(settings.calendars.map((id) => fetchCalendar(id, params, token)));
+    if (lists.includes(null)) {
       store.set('token', { value: '', exp: 0 });
       setStatus('Toca aquí para actualizar el calendario', true);
       return;
     }
-    if (!res.ok) throw new Error(res.status);
-    const data = await res.json();
-    events = (data.items || [])
-      .filter((ev) => ev.status !== 'cancelled')
-      .filter((ev) => !(ev.attendees || []).some((a) => a.self && a.responseStatus === 'declined'))
-      .map((ev) => ({
-        id: ev.id,
-        title: ev.summary || '(Sin título)',
-        allDay: !ev.start.dateTime,
-        start: ev.start.dateTime || ev.start.date,
-        end: ev.end.dateTime || ev.end.date,
-        link: ev.hangoutLink
-          || ev.conferenceData?.entryPoints?.find((e) => e.entryPointType === 'video')?.uri
-          || '',
-        location: ev.location || '',
-      }));
-    store.set('events', { day: currentDay, items: events });
+    // The same meeting can appear in several selected calendars.
+    const seen = new Set();
+    const all = lists.flat()
+      .filter((ev) => {
+        const key = `${ev.uid}|${ev.start}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .sort((a, b) => (b.allDay - a.allDay) || (startDate(a) - startDate(b)));
+    events = all.filter((ev) => startDate(ev) < endOfToday);
+    tomorrowFirst = all.find((ev) => !ev.allDay && startDate(ev) >= endOfToday) || null;
+    store.set('events', { day: currentDay, items: events, tomorrow: tomorrowFirst });
     $('connect').hidden = true;
     setStatus('');
     renderEvents();
   } catch {
     setStatus('Sin conexión — mostrando lo último guardado', false);
+  }
+}
+
+// Returns null on 401 so the caller can drop the token; a calendar that no longer exists yields [].
+async function fetchCalendar(id, params, token) {
+  const res = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(id)}/events?${params}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (res.status === 401) return null;
+  if (res.status === 404) return [];
+  if (!res.ok) throw new Error(res.status);
+  const data = await res.json();
+  return (data.items || [])
+    .filter((ev) => ev.status !== 'cancelled')
+    .filter((ev) => !(ev.attendees || []).some((a) => a.self && a.responseStatus === 'declined'))
+    .map((ev) => ({
+      id: ev.id,
+      uid: ev.iCalUID || ev.id,
+      title: ev.summary || '(Sin título)',
+      allDay: !ev.start.dateTime,
+      start: ev.start.dateTime || ev.start.date,
+      end: ev.end.dateTime || ev.end.date,
+      link: ev.hangoutLink
+        || ev.conferenceData?.entryPoints?.find((e) => e.entryPointType === 'video')?.uri
+        || '',
+      location: ev.location || '',
+      description: htmlToText(ev.description || '').slice(0, 2000),
+      attendees: (ev.attendees || [])
+        .filter((a) => !a.resource)
+        .map((a) => ({ name: a.displayName || a.email, status: a.responseStatus, self: !!a.self })),
+    }));
+}
+
+// All-day dates ("2026-10-20") must be read as local midnight, not UTC.
+function startDate(ev) {
+  return new Date(ev.allDay ? `${ev.start}T00:00` : ev.start);
+}
+
+// Descriptions arrive as HTML; DOMParser never runs scripts, and only text is kept.
+function htmlToText(html) {
+  const withBreaks = html.replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|li)>/gi, '\n');
+  const doc = new DOMParser().parseFromString(withBreaks, 'text/html');
+  doc.querySelectorAll('script, style').forEach((el) => el.remove());
+  return doc.body.textContent.trim();
+}
+
+async function listCalendars() {
+  const token = getToken();
+  if (!token) return null;
+  try {
+    const res = await fetch('https://www.googleapis.com/calendar/v3/users/me/calendarList?minAccessRole=reader', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return null;
+    return (await res.json()).items || [];
+  } catch {
+    return null;
   }
 }
 
@@ -283,6 +351,9 @@ function renderEvents() {
     }
 
     li.append(when, body);
+    li.addEventListener('click', (e) => {
+      if (!e.target.closest('a')) openDetails(ev);
+    });
     list.append(li);
   }
 
@@ -297,6 +368,9 @@ function renderEvents() {
 
   const remaining = events.some((e) => e.allDay || new Date(e.end) > now);
   $('empty').hidden = remaining || !store.get('events', null);
+  const tomorrow = $('tomorrow');
+  tomorrow.hidden = remaining || !tomorrowFirst;
+  if (tomorrowFirst) tomorrow.textContent = `Mañana: ${fmtTime(tomorrowFirst.start)} · ${tomorrowFirst.title}`;
 
   const next = $('next');
   next.classList.remove('soon', 'imminent');
@@ -316,6 +390,7 @@ function renderEvents() {
     next.hidden = true;
   }
   renderJoin(current, upcoming);
+  renderFocus();
 }
 
 // Big join button from 2 min before start until 10 min in.
@@ -337,6 +412,122 @@ function setStatus(text, actionable) {
   el.textContent = text;
   el.hidden = !text;
   el.classList.toggle('warn', !!actionable);
+}
+
+// ---------- Event details ----------
+
+const RSVP = { accepted: 'Asistirá', declined: 'No asistirá', tentative: 'Quizás', needsAction: 'Sin responder' };
+
+function openDetails(ev) {
+  $('d-title').textContent = ev.title;
+  $('d-when').textContent = ev.allDay ? 'Todo el día' : `${fmtTime(ev.start)} – ${fmtTime(ev.end)}`;
+  $('d-location').textContent = ev.location;
+  $('d-location').hidden = !ev.location;
+  $('d-link').hidden = !ev.link;
+  $('d-link').href = ev.link || '#';
+  $('d-desc').textContent = ev.description || '';
+  $('d-desc').hidden = !ev.description;
+  const list = $('d-attendees');
+  list.replaceChildren(...(ev.attendees || []).map((a) => {
+    const li = document.createElement('li');
+    li.textContent = a.self ? `${a.name} (tú)` : a.name;
+    const st = document.createElement('span');
+    st.className = `rsvp ${a.status}`;
+    st.textContent = RSVP[a.status] || '';
+    li.append(st);
+    return li;
+  }));
+  list.hidden = !list.children.length;
+  $('details').showModal();
+}
+
+// ---------- Focus block ----------
+
+// Free time until the next meeting, or null while one is running.
+function freeMinutes() {
+  const now = Date.now();
+  const timed = events.filter((e) => !e.allDay);
+  if (timed.some((e) => new Date(e.start) <= now && new Date(e.end) > now)) return null;
+  const upcoming = timed.find((e) => new Date(e.start) > now);
+  return upcoming ? Math.floor((new Date(upcoming.start) - now) / 60000) : Infinity;
+}
+
+function startFocus() {
+  const free = freeMinutes();
+  // Leave 2 min of slack before the next meeting.
+  const min = Math.min(FOCUS_MIN, free === Infinity ? FOCUS_MIN : free - 2);
+  focus = { start: Date.now(), end: Date.now() + min * 60000 };
+  store.set('focus', focus);
+  renderFocus();
+}
+
+function stopFocus() {
+  focus = null;
+  store.remove('focus');
+  renderFocus();
+}
+
+function renderFocus() {
+  const now = Date.now();
+  if (focus && now >= focus.end) {
+    const { end } = focus;
+    focus = null;
+    store.remove('focus');
+    // Only celebrate a block that just finished, not one that expired while the app was closed.
+    if (now - end < STALE_ALERT_MS) alertFor(`focus|${end}`);
+  }
+  const btn = $('focus-btn');
+  const label = $('focus');
+  if (focus) {
+    const left = Math.ceil((focus.end - now) / 1000);
+    label.textContent = `Enfoque · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+    label.hidden = false;
+    btn.textContent = 'Terminar';
+    btn.hidden = false;
+  } else {
+    label.hidden = true;
+    const free = freeMinutes();
+    btn.hidden = free === null || free < FOCUS_MIN_GAP;
+    if (!btn.hidden) btn.textContent = `Bloque de enfoque · ${Math.min(FOCUS_MIN, free === Infinity ? FOCUS_MIN : free - 2)} min`;
+  }
+  renderProgress(now);
+}
+
+// Thin bar under the clock: the focus block if one runs, else the current meeting.
+function renderProgress(now) {
+  const current = events.find((e) => !e.allDay && new Date(e.start) <= now && new Date(e.end) > now);
+  const span = focus ? [focus.start, focus.end]
+    : current ? [new Date(current.start).getTime(), new Date(current.end).getTime()] : null;
+  const bar = $('progress');
+  bar.hidden = !span;
+  if (span) bar.style.setProperty('--p', `${Math.min(100, ((now - span[0]) / (span[1] - span[0])) * 100)}%`);
+}
+
+// ---------- Night mode & burn-in ----------
+
+function toMinutes(hhmm) {
+  const [h, m] = hhmm.split(':').map(Number);
+  return h * 60 + m;
+}
+
+function applyNight(now) {
+  let on = false;
+  if (settings.night) {
+    const cur = now.getHours() * 60 + now.getMinutes();
+    const from = toMinutes(settings.nightFrom);
+    const to = toMinutes(settings.nightTo);
+    on = from <= to ? cur >= from && cur < to : cur >= from || cur < to;
+  }
+  document.documentElement.classList.toggle('night', on);
+}
+
+// Nudge the clock a few pixels now and then so an always-on OLED doesn't burn in the digits.
+function shiftClock() {
+  if (Date.now() - lastShift < SHIFT_MS) return;
+  lastShift = Date.now();
+  const r = () => `${Math.round(Math.random() * 12 - 6)}px`;
+  $('clock').style.setProperty('--dx', r());
+  $('clock').style.setProperty('--dy', r());
 }
 
 // ---------- Meeting alerts ----------
@@ -425,7 +616,35 @@ function openSettings() {
   $('alert-min').value = String(settings.alertMin);
   if (!$('alert-min').value) $('alert-min').value = '5';
   $('sound').checked = settings.sound;
+  $('night').checked = settings.night;
+  $('night-from').value = settings.nightFrom;
+  $('night-to').value = settings.nightTo;
+  renderCalendarChoices();
   $('settings').showModal();
+}
+
+async function renderCalendarChoices() {
+  const box = $('calendars');
+  box.replaceChildren(Object.assign(document.createElement('p'), {
+    className: 'muted', textContent: getToken() ? 'Cargando…' : 'Conecta Google Calendar para elegir.',
+  }));
+  const cals = await listCalendars();
+  if (!cals) return;
+  box.replaceChildren(...cals.map((cal) => {
+    // The primary calendar is stored as 'primary' so the default keeps working across accounts.
+    const id = cal.primary ? 'primary' : cal.id;
+    const label = document.createElement('label');
+    label.className = 'row';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = id;
+    input.checked = settings.calendars.includes(id);
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    dot.style.background = cal.backgroundColor || 'var(--muted)';
+    label.append(input, dot, cal.summaryOverride || cal.summary || id);
+    return label;
+  }));
 }
 
 $('settings').addEventListener('close', () => {
@@ -441,6 +660,15 @@ $('settings').addEventListener('close', () => {
   settings.h24 = $('h24').checked;
   settings.alertMin = Number($('alert-min').value);
   settings.sound = $('sound').checked;
+  settings.night = $('night').checked;
+  settings.nightFrom = $('night-from').value || '22:00';
+  settings.nightTo = $('night-to').value || '07:00';
+  const boxes = [...$('calendars').querySelectorAll('input[type="checkbox"]')];
+  // Only touch the selection if the list loaded; keep at least one calendar.
+  if (boxes.length) {
+    const picked = boxes.filter((b) => b.checked).map((b) => b.value);
+    settings.calendars = picked.length ? picked : ['primary'];
+  }
   store.set('settings', settings);
   applyWakeLock();
   renderEvents();
@@ -456,12 +684,19 @@ $('disconnect').addEventListener('click', () => {
   store.remove('token');
   store.remove('events');
   events = [];
+  tomorrowFirst = null;
   renderEvents();
   $('settings').close();
   lastFetch = 0;
 });
 
 $('settings-btn').addEventListener('click', openSettings);
+$('focus-btn').addEventListener('click', () => (focus ? stopFocus() : startFocus()));
+$('clock').addEventListener('dblclick', () => {
+  if (!document.fullscreenEnabled) return;
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen().catch(() => {});
+});
 // `click` counts as user activation for touch too (`pointerdown` only does for mouse).
 // Controls handle their own token flow, so taps on them don't also trigger a renewal.
 document.addEventListener('click', (e) => {
